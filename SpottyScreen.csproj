@@ -126,5 +126,9 @@
   <ItemGroup>
     <Resource Include="Spotty.ico" />
   </ItemGroup>
+  <ItemGroup>
+    <Resource Include="assets\example.gif" />
+    <Resource Include="assets\example.png" />
+  </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

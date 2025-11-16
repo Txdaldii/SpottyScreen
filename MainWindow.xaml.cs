@@ -27,6 +27,8 @@ namespace SpottyScreen
         private List<LyricLine> lyrics = new List<LyricLine>();
         private int currentLyricIndex = -1;
         private DispatcherTimer progressTimer;
+        private bool bannerShown = false;
+        private FullTrack nextTrack = null; // Store next track info
         // private DispatcherTimer lyricTimer = new DispatcherTimer(); // Removed redundant timer
 
         public MainWindow()
@@ -92,7 +94,7 @@ namespace SpottyScreen
                 {
                     CodeChallengeMethod = "S256",
                     CodeChallenge = challenge,
-                    Scope = new[] { Scopes.UserReadPlaybackState, Scopes.UserReadCurrentlyPlaying }
+                    Scope = new[] { Scopes.UserReadPlaybackState, Scopes.UserReadCurrentlyPlaying, Scopes.UserReadPlaybackPosition }
                 };
 
                 using (var http = new HttpListener())
@@ -245,10 +247,21 @@ namespace SpottyScreen
                     {
                         Console.WriteLine($"New track detected: {track.Name} by {string.Join(", ", track.Artists.Select(a => a.Name))}");
                         currentTrack = track;
+                        
+                        // Hide banner immediately when track changes
+                        Application.Current.Dispatcher.Invoke(() =>
+                        {
+                            HideNextSongBanner();
+                            bannerShown = false;
+                        });
+                        
                         ResetLyricsUI();
                         UpdateTrackInfoUI(track);
                         await LoadLyricsAsync(track);
                         InitializeProgressBar(track.DurationMs);
+                        
+                        // Fetch the next track in queue
+                        await FetchNextTrack();
                     }
                     // Playback stopped or no item
                     else if (playback == null || playback.Item == null)
@@ -262,6 +275,8 @@ namespace SpottyScreen
                             {
                                 progressTimer?.Stop();
                                 PlaybackProgressBar.Value = 0;
+                                HideNextSongBanner();
+                                bannerShown = false;
                             });
                         }
                     }
@@ -270,10 +285,52 @@ namespace SpottyScreen
                     if (playback?.ProgressMs != null && currentTrack != null)
                     {
                         var playbackMs = playback.ProgressMs.Value;
+                        var durationMs = currentTrack.DurationMs;
+                        
                         Application.Current.Dispatcher.Invoke(() =>
                         {
                             PlaybackProgressBar.Value = playbackMs;
+                            CurrentTimeLabel.Text = FormatTime(playbackMs); // Add this line
                         });
+
+                        // Handle banner visibility based on remaining time
+                        double remainingSeconds = (durationMs - playbackMs) / 1000.0;
+                        
+                        if (remainingSeconds <= 10 && remainingSeconds > 0 && !bannerShown && nextTrack != null)
+                        {
+                            Application.Current.Dispatcher.Invoke(() =>
+                            {
+                                ShowNextSongBanner();
+                                bannerShown = true;
+                            });
+                        }
+                        else if (remainingSeconds > 10 && bannerShown)
+                        {
+                            Application.Current.Dispatcher.Invoke(() =>
+                            {
+                                HideNextSongBanner();
+                                bannerShown = false;
+                            });
+                        }
+
+                        // Update banner countdown progress bar with smooth animation
+                        if (bannerShown && remainingSeconds <= 10 && remainingSeconds > 0)
+                        {
+                            Application.Current.Dispatcher.Invoke(() =>
+                            {
+                                // Progress from 0 to 1 over 10 seconds (inverted so it fills up)
+                                double progress = (10 - remainingSeconds) / 10.0;
+                                
+                                // Smooth animation for the countdown bar
+                                var animation = new DoubleAnimation
+                                {
+                                    To = progress,
+                                    Duration = TimeSpan.FromMilliseconds(200),
+                                    EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }
+                                };
+                                NextSongProgressBar.BeginAnimation(System.Windows.Controls.Primitives.RangeBase.ValueProperty, animation);
+                            });
+                        }
 
                         var playbackTime = TimeSpan.FromMilliseconds(playbackMs);
                         SyncLyricsWithPlayback(playbackTime);
@@ -310,6 +367,53 @@ namespace SpottyScreen
             Console.WriteLine("Polling stopped.");
         }
 
+        // Fetch the next track from Spotify queue
+        private async Task FetchNextTrack()
+        {
+            try
+            {
+                var queue = await spotify.Player.GetQueue();
+                
+                if (queue?.Queue != null && queue.Queue.Any())
+                {
+                    // Get the first item in the queue
+                    if (queue.Queue.First() is FullTrack track)
+                    {
+                        nextTrack = track;
+                        Console.WriteLine($"Next track in queue: {track.Name} by {string.Join(", ", track.Artists.Select(a => a.Name))}");
+                        
+                        // Update the banner UI
+                        Application.Current.Dispatcher.Invoke(() =>
+                        {
+                            NextTrackName.Text = track.Name;
+                            NextArtistName.Text = string.Join(", ", track.Artists.Select(a => a.Name));
+                            
+                            var imageUrl = track.Album.Images.FirstOrDefault()?.Url;
+                            if (!string.IsNullOrEmpty(imageUrl))
+                            {
+                                var bitmap = new BitmapImage();
+                                bitmap.BeginInit();
+                                bitmap.UriSource = new Uri(imageUrl);
+                                bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                                bitmap.EndInit();
+                                NextAlbumCover.Source = bitmap;
+                            }
+                        });
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("No next track in queue.");
+                    nextTrack = null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error fetching next track: {ex.Message}");
+                nextTrack = null;
+            }
+        }
+
         // Initializes the progress bar for a new track and starts a DispatcherTimer for smooth updates
         private void InitializeProgressBar(int trackDurationMs)
         {
@@ -317,6 +421,10 @@ namespace SpottyScreen
             {
                 PlaybackProgressBar.Maximum = trackDurationMs;
                 PlaybackProgressBar.Value = 0;
+                
+                // Update time labels
+                CurrentTimeLabel.Text = "0:00";
+                TotalTimeLabel.Text = FormatTime(trackDurationMs);
 
                 if (progressTimer != null)
                 {
@@ -326,7 +434,7 @@ namespace SpottyScreen
 
                 progressTimer = new DispatcherTimer
                 {
-                    Interval = TimeSpan.FromMilliseconds(50)
+                    Interval = TimeSpan.FromMilliseconds(50) // 50ms for smooth updates
                 };
                 progressTimer.Tick += ProgressTimer_Tick;
                 progressTimer.Start();
@@ -341,6 +449,9 @@ namespace SpottyScreen
                 PlaybackProgressBar.Value = Math.Min(
                     PlaybackProgressBar.Value + progressTimer.Interval.TotalMilliseconds,
                     PlaybackProgressBar.Maximum);
+                
+                // Update current time label
+                CurrentTimeLabel.Text = FormatTime(PlaybackProgressBar.Value);
             }
         }
 
@@ -831,6 +942,58 @@ namespace SpottyScreen
             {
                 return $"[{Time:mm\\:ss\\.ff}] {Text}";
             }
+        }
+
+        private void ShowNextSongBanner()
+        {
+            NextSongBanner.Visibility = Visibility.Visible;
+            NextSongProgressBar.Value = 0; // Reset progress bar
+            
+            // Slide in animation from the right
+            var slideIn = new DoubleAnimation
+            {
+                From = 100,
+                To = 0,
+                Duration = TimeSpan.FromMilliseconds(400),
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+            };
+            
+            var fadeIn = new DoubleAnimation
+            {
+                From = 0,
+                To = 1,
+                Duration = TimeSpan.FromMilliseconds(400)
+            };
+            
+            var translateTransform = new TranslateTransform();
+            NextSongBanner.RenderTransform = translateTransform;
+            
+            translateTransform.BeginAnimation(TranslateTransform.XProperty, slideIn);
+            NextSongBanner.BeginAnimation(OpacityProperty, fadeIn);
+        }
+        
+        private void HideNextSongBanner()
+        {
+            var fadeOut = new DoubleAnimation
+            {
+                From = 1,
+                To = 0,
+                Duration = TimeSpan.FromMilliseconds(300)
+            };
+            
+            fadeOut.Completed += (s, e) => 
+            {
+                NextSongBanner.Visibility = Visibility.Collapsed;
+                NextSongProgressBar.Value = 0; // Reset progress when hiding
+            };
+            NextSongBanner.BeginAnimation(OpacityProperty, fadeOut);
+        }
+
+        // Add this method to format time in mm:ss format
+        private string FormatTime(double milliseconds)
+        {
+            var timeSpan = TimeSpan.FromMilliseconds(milliseconds);
+            return $"{(int)timeSpan.TotalMinutes}:{timeSpan.Seconds:D2}";
         }
     }
 }
