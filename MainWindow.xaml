@@ -3,7 +3,46 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         WindowStyle="None" WindowState="Maximized"
         Title="Spotty Screen"
-        Background="Black" AllowsTransparency="True">
+        Background="Black" AllowsTransparency="True"
+        MouseEnter="Window_MouseEnter"
+        MouseLeave="Window_MouseLeave">
+    
+    <Window.Resources>
+        <!-- Button Style for Window Controls -->
+        <Style x:Key="WindowControlButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="#DD1A1A1A"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="FontSize" Value="20"/>
+            <Setter Property="FontFamily" Value="Segoe UI Variable"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                CornerRadius="10"
+                                Padding="10">
+                            <Border.Effect>
+                                <DropShadowEffect Color="Black" BlurRadius="10" ShadowDepth="3" Opacity="0.5"/>
+                            </Border.Effect>
+                            <TextBlock Text="{TemplateBinding Content}"
+                                       Foreground="{TemplateBinding Foreground}"
+                                       FontSize="{TemplateBinding FontSize}"
+                                       FontFamily="{TemplateBinding FontFamily}"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#FF2A2A2A"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+    
     <Grid x:Name="RootGrid">
         <Border x:Name="BlurredBackground" Background="Black" BorderThickness="0"/>
         <Rectangle>
@@ -78,20 +117,16 @@
                          BorderThickness="0"
                          VerticalAlignment="Center">
                 <ProgressBar.Resources>
-                    <!-- Style for the background of the progress bar (track) -->
                     <Style TargetType="Border">
                         <Setter Property="CornerRadius" Value="5"/>
                         <Setter Property="Background" Value="Transparent"/>
-                        <!-- Darker background color for the track -->
                     </Style>
                 </ProgressBar.Resources>
                 <ProgressBar.Template>
                     <ControlTemplate TargetType="ProgressBar">
                         <Border Background="#0000" BorderBrush="Transparent" BorderThickness="0" CornerRadius="5">
                             <Grid>
-                                <!-- Background (track) -->
                                 <Border x:Name="PART_Track" Background="#0000" CornerRadius="5" />
-                                <!-- Foreground (moving progress) -->
                                 <Border x:Name="PART_Indicator" Background="{Binding Foreground, RelativeSource={RelativeSource TemplatedParent}}" CornerRadius="5"/>
                             </Grid>
                         </Border>
@@ -129,19 +164,16 @@
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 
-                <!-- Main content -->
                 <Grid Grid.Row="0">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
                     
-                    <!-- Mini Album Cover -->
                     <Border Width="60" Height="60" CornerRadius="8" Margin="0,0,15,0">
                         <Image x:Name="NextAlbumCover" Stretch="UniformToFill"/>
                     </Border>
                     
-                    <!-- Text Info -->
                     <StackPanel Grid.Column="1" VerticalAlignment="Center">
                         <TextBlock Text="UP NEXT" 
                                    FontSize="12" 
@@ -163,7 +195,6 @@
                     </StackPanel>
                 </Grid>
                 
-                <!-- Countdown Progress Bar -->
                 <ProgressBar x:Name="NextSongProgressBar"
                              Grid.Row="1"
                              Height="4"
@@ -183,7 +214,6 @@
                                             Background="{TemplateBinding Foreground}" 
                                             HorizontalAlignment="Left"
                                             CornerRadius="2">
-                                        <!-- Smooth transition -->
                                         <Border.RenderTransform>
                                             <ScaleTransform ScaleX="1" ScaleY="1"/>
                                         </Border.RenderTransform>
@@ -195,6 +225,60 @@
                 </ProgressBar>
             </Grid>
         </Border>
+
+        <!-- Window Controls Panel (appears on hover) -->
+        <Grid x:Name="WindowControlsPanel" 
+              Visibility="Collapsed"
+              HorizontalAlignment="Center"
+              VerticalAlignment="Top"
+              Margin="0,20,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            
+            <!-- Move to Previous Monitor Button -->
+            <Button x:Name="MoveToPreviousMonitorButton"
+                    Grid.Column="0"
+                    Content="◄"
+                    Width="50"
+                    Height="50"
+                    Margin="5"
+                    Click="MoveToPreviousMonitor_Click"
+                    Style="{StaticResource WindowControlButtonStyle}"/>
+            
+            <!-- Minimize Button -->
+            <Button x:Name="MinimizeButton"
+                    Grid.Column="1"
+                    Content="─"
+                    Width="50"
+                    Height="50"
+                    Margin="5"
+                    Click="MinimizeButton_Click"
+                    Style="{StaticResource WindowControlButtonStyle}"/>
+            
+            <!-- Close Button -->
+            <Button x:Name="CloseButton"
+                    Grid.Column="2"
+                    Content="✕"
+                    Width="50"
+                    Height="50"
+                    Margin="5"
+                    Click="CloseButton_Click"
+                    Style="{StaticResource WindowControlButtonStyle}"/>
+            
+            <!-- Move to Next Monitor Button -->
+            <Button x:Name="MoveToNextMonitorButton"
+                    Grid.Column="3"
+                    Content="►"
+                    Width="50"
+                    Height="50"
+                    Margin="5"
+                    Click="MoveToNextMonitor_Click"
+                    Style="{StaticResource WindowControlButtonStyle}"/>
+        </Grid>
 
     </Grid>
 </Window>

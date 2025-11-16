@@ -18,11 +18,19 @@ using System.Text;
 using System.Net;
 using System.Windows.Shapes;
 using System.Text.RegularExpressions; // Added for Regex
+using System.Runtime.InteropServices;
+using System.Windows.Interop;
+using Forms = System.Windows.Forms;
 
 namespace SpottyScreen
 {
     public partial class MainWindow : Window
     {
+        private const int WH_KEYBOARD_LL = 13;
+private const int WM_KEYDOWN = 0x0100;
+private LowLevelKeyboardProc _proc;
+private IntPtr _hookID = IntPtr.Zero;
+
         private SpotifyClient spotify;
         private List<LyricLine> lyrics = new List<LyricLine>();
         private int currentLyricIndex = -1;
@@ -36,6 +44,11 @@ namespace SpottyScreen
             InitializeComponent();
             // Ensure the ScrollViewer width is available for MaxWidth calculation
             LyricsScrollViewer.Loaded += (s, e) => { /* Can trigger initial UI update if needed */ };
+
+            // Hook into Windows messages to intercept Win+Arrow keys
+    _proc = HookCallback;
+    _hookID = SetHook(_proc);
+
             AuthenticateSpotify();
         }
 
@@ -995,5 +1008,154 @@ namespace SpottyScreen
             var timeSpan = TimeSpan.FromMilliseconds(milliseconds);
             return $"{(int)timeSpan.TotalMinutes}:{timeSpan.Seconds:D2}";
         }
+
+        #region Windows Hook for disabling Win+Arrow keys
+
+private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+[return: MarshalAs(UnmanagedType.Bool)]
+private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+[DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+[DllImport("user32.dll")]
+private static extern short GetAsyncKeyState(int vKey);
+
+private IntPtr SetHook(LowLevelKeyboardProc proc)
+{
+    using (Process curProcess = Process.GetCurrentProcess())
+    using (ProcessModule curModule = curProcess.MainModule)
+    {
+        return SetWindowsHookEx(WH_KEYBOARD_LL, proc, GetModuleHandle(curModule.ModuleName), 0);
+    }
+}
+
+private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+{
+    if (nCode >= 0 && wParam == (IntPtr)WM_KEYDOWN)
+    {
+        int vkCode = Marshal.ReadInt32(lParam);
+        
+        // Check if Windows key is pressed (VK_LWIN = 0x5B, VK_RWIN = 0x5C)
+        bool winKeyPressed = (GetAsyncKeyState(0x5B) & 0x8000) != 0 || (GetAsyncKeyState(0x5C) & 0x8000) != 0;
+        
+        // VK_LEFT = 0x25, VK_RIGHT = 0x27, VK_UP = 0x26, VK_DOWN = 0x28
+        if (winKeyPressed && (vkCode == 0x25 || vkCode == 0x27 || vkCode == 0x26 || vkCode == 0x28))
+        {
+            // Block Windows+Arrow keys for this app
+            Application.Current.Dispatcher.Invoke(() =>
+            {
+                if (vkCode == 0x25) // Left arrow
+                {
+                    MoveWindowToPreviousMonitor();
+                }
+                else if (vkCode == 0x27) // Right arrow
+                {
+                    MoveWindowToNextMonitor();
+                }
+            });
+            return (IntPtr)1; // Block the key
+        }
+    }
+    return CallNextHookEx(_hookID, nCode, wParam, lParam);
+}
+
+#endregion
+
+#region Window Controls and Monitor Navigation
+
+private void Window_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
+{
+    // Show window controls on mouse enter with fade-in animation
+    var fadeIn = new DoubleAnimation
+    {
+        From = 0,
+        To = 1,
+        Duration = TimeSpan.FromMilliseconds(200)
+    };
+    WindowControlsPanel.Visibility = Visibility.Visible;
+    WindowControlsPanel.BeginAnimation(OpacityProperty, fadeIn);
+}
+
+private void Window_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+{
+    // Hide window controls on mouse leave with fade-out animation
+    var fadeOut = new DoubleAnimation
+    {
+        From = 1,
+        To = 0,
+        Duration = TimeSpan.FromMilliseconds(200)
+    };
+    fadeOut.Completed += (s, args) => WindowControlsPanel.Visibility = Visibility.Collapsed;
+    WindowControlsPanel.BeginAnimation(OpacityProperty, fadeOut);
+}
+
+private void CloseButton_Click(object sender, RoutedEventArgs e)
+{
+    Application.Current.Shutdown();
+}
+
+private void MinimizeButton_Click(object sender, RoutedEventArgs e)
+{
+    WindowState = WindowState.Minimized;
+}
+
+private void MoveToNextMonitor_Click(object sender, RoutedEventArgs e)
+{
+    MoveWindowToNextMonitor();
+}
+
+private void MoveToPreviousMonitor_Click(object sender, RoutedEventArgs e)
+{
+    MoveWindowToPreviousMonitor();
+}
+
+private void MoveWindowToNextMonitor()
+{
+    var screens = Forms.Screen.AllScreens.OrderBy(s => s.Bounds.Left).ToList();
+    var currentScreen = Forms.Screen.FromHandle(new WindowInteropHelper(this).Handle);
+    
+    int currentIndex = screens.IndexOf(currentScreen);
+    int nextIndex = (currentIndex + 1) % screens.Count;
+    
+    MoveToScreen(screens[nextIndex]);
+}
+
+private void MoveWindowToPreviousMonitor()
+{
+    var screens = Forms.Screen.AllScreens.OrderBy(s => s.Bounds.Left).ToList();
+    var currentScreen = Forms.Screen.FromHandle(new WindowInteropHelper(this).Handle);
+    
+    int currentIndex = screens.IndexOf(currentScreen);
+    int previousIndex = (currentIndex - 1 + screens.Count) % screens.Count;
+    
+    MoveToScreen(screens[previousIndex]);
+}
+
+private void MoveToScreen(Forms.Screen screen)
+{
+    // Temporarily change to Normal state to move
+    var previousState = WindowState;
+    WindowState = WindowState.Normal;
+
+    // Position window to cover the entire screen
+    Left = screen.Bounds.Left;
+    Top = screen.Bounds.Top;
+    Width = screen.Bounds.Width;
+    Height = screen.Bounds.Height;
+    
+    // Return to maximized state on the new screen
+    WindowState = WindowState.Maximized;
+}
+
+#endregion
     }
 }
