@@ -590,7 +590,7 @@ private IntPtr _hookID = IntPtr.Zero;
 
             bitmap.DownloadCompleted += async (s, e) =>
             {
-                AlbumCover.Source = bitmap;
+                AlbumCover.ImageSource = bitmap;
                 StartImageTransition();
 
                 // Extract color palette
@@ -637,7 +637,7 @@ private IntPtr _hookID = IntPtr.Zero;
                 }
             };
 
-            AlbumCover.Source = bitmap;
+            AlbumCover.ImageSource = bitmap;
         }
 
         /// <summary>
