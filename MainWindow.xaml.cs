@@ -16,221 +16,54 @@ using System.Windows.Threading;
 using System.Diagnostics;
 using System.Text;
 using System.Net;
-using System.Windows.Shapes;
 using System.Text.RegularExpressions; // Added for Regex
 using System.Runtime.InteropServices;
 using System.Windows.Interop;
+using Windows.Media;
+using Windows.Media.Control;
+
 using Forms = System.Windows.Forms;
+using SpottyScreen.Classes;
 
 namespace SpottyScreen
 {
     public partial class MainWindow : Window
     {
-        private const int WH_KEYBOARD_LL = 13;
-private const int WM_KEYDOWN = 0x0100;
-private LowLevelKeyboardProc _proc;
-private IntPtr _hookID = IntPtr.Zero;
+        public SpotifyClient Spotify;
 
-        private SpotifyClient spotify;
+        // Low-level keyboard hook to intercept Win+Arrow keys
+        private const int WH_KEYBOARD_LL = 13;
+        private const int WM_KEYDOWN = 0x0100;
+        private LowLevelKeyboardProc _proc;
+        private IntPtr _hookID = IntPtr.Zero;
+
+        private SpotifyManager manager;
         private List<LyricLine> lyrics = new List<LyricLine>();
         private int currentLyricIndex = -1;
         private DispatcherTimer progressTimer;
         private bool bannerShown = false;
         private FullTrack nextTrack = null; // Store next track info
-        // private DispatcherTimer lyricTimer = new DispatcherTimer(); // Removed redundant timer
 
         public MainWindow()
         {
+            manager = new SpotifyManager(this);
+
             InitializeComponent();
             // Ensure the ScrollViewer width is available for MaxWidth calculation
             LyricsScrollViewer.Loaded += (s, e) => { /* Can trigger initial UI update if needed */ };
 
             // Hook into Windows messages to intercept Win+Arrow keys
-    _proc = HookCallback;
-    _hookID = SetHook(_proc);
+            _proc = HookCallback;
+            _hookID = SetHook(_proc);
 
-            AuthenticateSpotify();
+            manager.Authenticate();
         }
 
-        private async void AuthenticateSpotify()
-        {
-            const string redirectUri = "http://127.0.0.1:5000/callback";
-            const string clientId = "41033dc65baf42e287b21398aafb4501"; // Replace with your client ID
-
-            string savedAccessToken = Properties.Settings.Default.SpotifyAccessToken;
-            string savedRefreshToken = Properties.Settings.Default.SpotifyRefreshToken;
-
-            var oauth = new OAuthClient();
-
-            if (!string.IsNullOrEmpty(savedAccessToken) && !string.IsNullOrEmpty(savedRefreshToken))
-            {
-                spotify = new SpotifyClient(savedAccessToken);
-
-                try
-                {
-                    await spotify.Player.GetCurrentPlayback(); // Test if token works
-                    StartPolling();
-                    return;
-                }
-                catch (APIUnauthorizedException)
-                {
-                    var success = await RefreshAccessToken(clientId, savedRefreshToken, oauth);
-                    if (success)
-                    {
-                        StartPolling();
-                        return;
-                    }
-                }
-                catch (Exception ex) // Catch other potential exceptions during initial check
-                {
-                    Console.WriteLine($"Error initializing Spotify client: {ex.Message}");
-                    // Decide how to handle this - maybe attempt full auth flow
-                }
-            }
-
-            // If token invalid, expired, or refresh failed, start full auth
-            await StartAuthorizationCodeFlow(clientId, redirectUri, oauth);
-        }
-
-        // Extracted auth flow logic for clarity
-        private async Task StartAuthorizationCodeFlow(string clientId, string redirectUri, OAuthClient oauth)
-        {
-            try
-            {
-                var (verifier, challenge) = PKCEUtil.GenerateCodes();
-
-                var loginRequest = new LoginRequest(
-                    new Uri(redirectUri),
-                    clientId,
-                    LoginRequest.ResponseType.Code
-                )
-                {
-                    CodeChallengeMethod = "S256",
-                    CodeChallenge = challenge,
-                    Scope = new[] { Scopes.UserReadPlaybackState, Scopes.UserReadCurrentlyPlaying, Scopes.UserReadPlaybackPosition }
-                };
-
-                using (var http = new HttpListener())
-                {
-                    http.Prefixes.Add("http://127.0.0.1:5000/callback/"); // Ensure trailing slash
-                    http.Start();
-                    WindowState = WindowState.Minimized;
-
-                    Process.Start(new ProcessStartInfo
-                    {
-                        FileName = loginRequest.ToUri().ToString(),
-                        UseShellExecute = true
-                    });
-
-                    var context = await http.GetContextAsync();
-                    var code = context.Request.QueryString["code"];
-
-                    // Send response to browser before proceeding
-                    string responseHtml = "<html><head><style>body { font-family: sans-serif; background-color: #f0f0f0; text-align: center; padding-top: 50px; }</style></head><body><h1>Authentication Successful!</h1><p>You can now close this window and return to SpottyScreen.</p><script>window.close();</script></body></html>";
-                    byte[] buffer = Encoding.UTF8.GetBytes(responseHtml);
-                    context.Response.ContentType = "text/html";
-                    context.Response.ContentLength64 = buffer.Length;
-                    await context.Response.OutputStream.WriteAsync(buffer, 0, buffer.Length);
-                    context.Response.Close(); // Close the response stream
-                    http.Stop(); // Stop the listener
-                    WindowState = WindowState.Maximized;
-
-                    if (string.IsNullOrEmpty(code))
-                    {
-                        MessageBox.Show("Authentication failed: No code received from Spotify.", "Authentication Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                        // Handle failed auth (e.g., close app, show error message)
-                        return;
-                    }
-
-                    var tokenRequest = new PKCETokenRequest(clientId, code, new Uri(redirectUri), verifier);
-                    var tokenResponse = await oauth.RequestToken(tokenRequest);
-
-                    Properties.Settings.Default.SpotifyAccessToken = tokenResponse.AccessToken;
-                    Properties.Settings.Default.SpotifyRefreshToken = tokenResponse.RefreshToken;
-                    Properties.Settings.Default.Save();
-
-                    spotify = new SpotifyClient(tokenResponse.AccessToken);
-                    StartPolling(); // Start polling after successful auth
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Authentication flow error: {ex.Message}");
-                MessageBox.Show($"Authentication failed: {ex.Message}", "Authentication Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                // Consider cleaning up tokens if auth fails definitively
-                Properties.Settings.Default.SpotifyAccessToken = null;
-                Properties.Settings.Default.SpotifyRefreshToken = null;
-                Properties.Settings.Default.Save();
-            }
-        }
-
-
-        private async Task<bool> RefreshAccessToken(string clientId, string refreshToken, OAuthClient oauth)
-        {
-            // Prevent null refresh token issue
-            if (string.IsNullOrEmpty(refreshToken))
-            {
-                Console.WriteLine("Cannot refresh token: Refresh token is missing.");
-                MessageBox.Show("Spotify session expired or invalid. Please log in again.", "Authentication Error", MessageBoxButton.OK, MessageBoxImage.Warning);
-                Properties.Settings.Default.SpotifyAccessToken = null; // Clear invalid tokens
-                Properties.Settings.Default.SpotifyRefreshToken = null;
-                Properties.Settings.Default.Save();
-                // Trigger full re-authentication
-                await StartAuthorizationCodeFlow(clientId, "http://127.0.0.1:5000/callback", oauth);
-                return false; // Indicate refresh wasn't successful (new auth started)
-            }
-
-            try
-            {
-                var refreshRequest = new PKCETokenRefreshRequest(clientId, refreshToken);
-                var tokenResponse = await oauth.RequestToken(refreshRequest);
-
-                Properties.Settings.Default.SpotifyAccessToken = tokenResponse.AccessToken;
-
-                // Spotify might issue a new refresh token during refresh
-                if (!string.IsNullOrEmpty(tokenResponse.RefreshToken))
-                {
-                    Properties.Settings.Default.SpotifyRefreshToken = tokenResponse.RefreshToken;
-                }
-
-                Properties.Settings.Default.Save();
-
-                spotify = new SpotifyClient(tokenResponse.AccessToken); // Update client with new token
-                Console.WriteLine("Access token refreshed successfully.");
-                return true;
-            }
-            catch (APIException apiEx) // Catch specific API errors
-            {
-                Console.WriteLine($"Token refresh failed: {apiEx.Message}");
-                // Handle specific errors, e.g., invalid_grant often means refresh token is revoked/expired
-                if (apiEx.Response?.StatusCode == System.Net.HttpStatusCode.BadRequest)
-                {
-                    MessageBox.Show("Spotify session expired. Please log in again.", "Authentication Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                    Properties.Settings.Default.SpotifyAccessToken = null; // Clear invalid tokens
-                    Properties.Settings.Default.SpotifyRefreshToken = null;
-                    Properties.Settings.Default.Save();
-                    // Trigger full re-authentication
-                    await StartAuthorizationCodeFlow(clientId, "http://127.0.0.1:5000/callback", oauth);
-                }
-                else
-                {
-                    MessageBox.Show($"Failed to refresh Spotify session: {apiEx.Message}", "Authentication Error", MessageBoxButton.OK, MessageBoxImage.Warning);
-                }
-                return false;
-            }
-            catch (Exception ex) // Catch other unexpected errors
-            {
-                Console.WriteLine($"Unexpected error during token refresh: {ex.Message}");
-                MessageBox.Show($"An unexpected error occurred while refreshing the Spotify session: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                // Potentially clear tokens or attempt re-auth depending on the error
-                return false;
-            }
-        }
 
         private FullTrack currentTrack;
         private bool isPolling = false; // Flag to prevent multiple polling loops
 
-        private async void StartPolling()
+        public async void StartPolling()
         {
             if (isPolling) return;
             isPolling = true;
@@ -238,7 +71,7 @@ private IntPtr _hookID = IntPtr.Zero;
 
             while (isPolling)
             {
-                if (spotify == null)
+                if (Spotify == null)
                 {
                     Console.WriteLine("Spotify client not initialized. Stopping polling.");
                     isPolling = false;
@@ -253,7 +86,7 @@ private IntPtr _hookID = IntPtr.Zero;
                 CurrentlyPlaying playback = null;
                 try
                 {
-                    playback = await spotify.Player.GetCurrentlyPlaying(new PlayerCurrentlyPlayingRequest());
+                    playback = await Spotify.Player.GetCurrentlyPlaying(new PlayerCurrentlyPlayingRequest());
 
                     // Track changed
                     if (playback?.Item is FullTrack track && track.Id != currentTrack?.Id)
@@ -355,7 +188,7 @@ private IntPtr _hookID = IntPtr.Zero;
                 {
                     Console.WriteLine("Access token expired during polling, attempting refresh...");
                     isPolling = false;
-                    bool refreshed = await RefreshAccessToken("41033dc65baf42e287b21398aafb4501", Properties.Settings.Default.SpotifyRefreshToken, new OAuthClient());
+                    bool refreshed = await manager.RefreshAccessToken("41033dc65baf42e287b21398aafb4501", Properties.Settings.Default.SpotifyRefreshToken, new OAuthClient());
                     if (refreshed)
                     {
                         StartPolling();
@@ -385,7 +218,7 @@ private IntPtr _hookID = IntPtr.Zero;
         {
             try
             {
-                var queue = await spotify.Player.GetQueue();
+                var queue = await Spotify.Player.GetQueue();
                 
                 if (queue?.Queue != null && queue.Queue.Any())
                 {
@@ -1011,151 +844,151 @@ private IntPtr _hookID = IntPtr.Zero;
 
         #region Windows Hook for disabling Win+Arrow keys
 
-private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+        private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
 
-[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
 
-[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-[return: MarshalAs(UnmanagedType.Bool)]
-private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
 
-[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
 
-[DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-private static extern IntPtr GetModuleHandle(string lpModuleName);
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr GetModuleHandle(string lpModuleName);
 
-[DllImport("user32.dll")]
-private static extern short GetAsyncKeyState(int vKey);
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vKey);
 
-private IntPtr SetHook(LowLevelKeyboardProc proc)
-{
-    using (Process curProcess = Process.GetCurrentProcess())
-    using (ProcessModule curModule = curProcess.MainModule)
-    {
-        return SetWindowsHookEx(WH_KEYBOARD_LL, proc, GetModuleHandle(curModule.ModuleName), 0);
-    }
-}
-
-private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
-{
-    if (nCode >= 0 && wParam == (IntPtr)WM_KEYDOWN)
-    {
-        int vkCode = Marshal.ReadInt32(lParam);
-        
-        // Check if Windows key is pressed (VK_LWIN = 0x5B, VK_RWIN = 0x5C)
-        bool winKeyPressed = (GetAsyncKeyState(0x5B) & 0x8000) != 0 || (GetAsyncKeyState(0x5C) & 0x8000) != 0;
-        
-        // VK_LEFT = 0x25, VK_RIGHT = 0x27, VK_UP = 0x26, VK_DOWN = 0x28
-        if (winKeyPressed && (vkCode == 0x25 || vkCode == 0x27 || vkCode == 0x26 || vkCode == 0x28))
+        private IntPtr SetHook(LowLevelKeyboardProc proc)
         {
-            // Block Windows+Arrow keys for this app
-            Application.Current.Dispatcher.Invoke(() =>
+            using (Process curProcess = Process.GetCurrentProcess())
+            using (ProcessModule curModule = curProcess.MainModule)
             {
-                if (vkCode == 0x25) // Left arrow
-                {
-                    MoveWindowToPreviousMonitor();
-                }
-                else if (vkCode == 0x27) // Right arrow
-                {
-                    MoveWindowToNextMonitor();
-                }
-            });
-            return (IntPtr)1; // Block the key
+                return SetWindowsHookEx(WH_KEYBOARD_LL, proc, GetModuleHandle(curModule.ModuleName), 0);
+            }
         }
-    }
-    return CallNextHookEx(_hookID, nCode, wParam, lParam);
-}
 
-#endregion
+        private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0 && wParam == (IntPtr)WM_KEYDOWN)
+            {
+                int vkCode = Marshal.ReadInt32(lParam);
+        
+                // Check if Windows key is pressed (VK_LWIN = 0x5B, VK_RWIN = 0x5C)
+                bool winKeyPressed = (GetAsyncKeyState(0x5B) & 0x8000) != 0 || (GetAsyncKeyState(0x5C) & 0x8000) != 0;
+        
+                // VK_LEFT = 0x25, VK_RIGHT = 0x27, VK_UP = 0x26, VK_DOWN = 0x28
+                if (winKeyPressed && (vkCode == 0x25 || vkCode == 0x27 || vkCode == 0x26 || vkCode == 0x28))
+                {
+                    // Block Windows+Arrow keys for this app
+                    Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        if (vkCode == 0x25) // Left arrow
+                        {
+                            MoveWindowToPreviousMonitor();
+                        }
+                        else if (vkCode == 0x27) // Right arrow
+                        {
+                            MoveWindowToNextMonitor();
+                        }
+                    });
+                    return (IntPtr)1; // Block the key
+                }
+            }
+            return CallNextHookEx(_hookID, nCode, wParam, lParam);
+        }
 
-#region Window Controls and Monitor Navigation
+        #endregion
 
-private void Window_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
-{
-    // Show window controls on mouse enter with fade-in animation
-    var fadeIn = new DoubleAnimation
-    {
-        From = 0,
-        To = 1,
-        Duration = TimeSpan.FromMilliseconds(200)
-    };
-    WindowControlsPanel.Visibility = Visibility.Visible;
-    WindowControlsPanel.BeginAnimation(OpacityProperty, fadeIn);
-}
+        #region Window Controls and Monitor Navigation
 
-private void Window_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
-{
-    // Hide window controls on mouse leave with fade-out animation
-    var fadeOut = new DoubleAnimation
-    {
-        From = 1,
-        To = 0,
-        Duration = TimeSpan.FromMilliseconds(200)
-    };
-    fadeOut.Completed += (s, args) => WindowControlsPanel.Visibility = Visibility.Collapsed;
-    WindowControlsPanel.BeginAnimation(OpacityProperty, fadeOut);
-}
+        private void Window_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            // Show window controls on mouse enter with fade-in animation
+            var fadeIn = new DoubleAnimation
+            {
+                From = 0,
+                To = 1,
+                Duration = TimeSpan.FromMilliseconds(200)
+            };
+            WindowControlsPanel.Visibility = Visibility.Visible;
+            WindowControlsPanel.BeginAnimation(OpacityProperty, fadeIn);
+        }
 
-private void CloseButton_Click(object sender, RoutedEventArgs e)
-{
-    Application.Current.Shutdown();
-}
+        private void Window_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            // Hide window controls on mouse leave with fade-out animation
+            var fadeOut = new DoubleAnimation
+            {
+                From = 1,
+                To = 0,
+                Duration = TimeSpan.FromMilliseconds(200)
+            };
+            fadeOut.Completed += (s, args) => WindowControlsPanel.Visibility = Visibility.Collapsed;
+            WindowControlsPanel.BeginAnimation(OpacityProperty, fadeOut);
+        }
 
-private void MinimizeButton_Click(object sender, RoutedEventArgs e)
-{
-    WindowState = WindowState.Minimized;
-}
+        private void CloseButton_Click(object sender, RoutedEventArgs e)
+        {
+            Application.Current.Shutdown();
+        }
 
-private void MoveToNextMonitor_Click(object sender, RoutedEventArgs e)
-{
-    MoveWindowToNextMonitor();
-}
+        private void MinimizeButton_Click(object sender, RoutedEventArgs e)
+        {
+            WindowState = WindowState.Minimized;
+        }
 
-private void MoveToPreviousMonitor_Click(object sender, RoutedEventArgs e)
-{
-    MoveWindowToPreviousMonitor();
-}
+        private void MoveToNextMonitor_Click(object sender, RoutedEventArgs e)
+        {
+            MoveWindowToNextMonitor();
+        }
 
-private void MoveWindowToNextMonitor()
-{
-    var screens = Forms.Screen.AllScreens.OrderBy(s => s.Bounds.Left).ToList();
-    var currentScreen = Forms.Screen.FromHandle(new WindowInteropHelper(this).Handle);
+        private void MoveToPreviousMonitor_Click(object sender, RoutedEventArgs e)
+        {
+            MoveWindowToPreviousMonitor();
+        }
+
+        private void MoveWindowToNextMonitor()
+        {
+            var screens = Forms.Screen.AllScreens.OrderBy(s => s.Bounds.Left).ToList();
+            var currentScreen = Forms.Screen.FromHandle(new WindowInteropHelper(this).Handle);
     
-    int currentIndex = screens.IndexOf(currentScreen);
-    int nextIndex = (currentIndex + 1) % screens.Count;
+            int currentIndex = screens.IndexOf(currentScreen);
+            int nextIndex = (currentIndex + 1) % screens.Count;
     
-    MoveToScreen(screens[nextIndex]);
-}
+            MoveToScreen(screens[nextIndex]);
+        }
 
-private void MoveWindowToPreviousMonitor()
-{
-    var screens = Forms.Screen.AllScreens.OrderBy(s => s.Bounds.Left).ToList();
-    var currentScreen = Forms.Screen.FromHandle(new WindowInteropHelper(this).Handle);
+        private void MoveWindowToPreviousMonitor()
+        {
+            var screens = Forms.Screen.AllScreens.OrderBy(s => s.Bounds.Left).ToList();
+            var currentScreen = Forms.Screen.FromHandle(new WindowInteropHelper(this).Handle);
     
-    int currentIndex = screens.IndexOf(currentScreen);
-    int previousIndex = (currentIndex - 1 + screens.Count) % screens.Count;
+            int currentIndex = screens.IndexOf(currentScreen);
+            int previousIndex = (currentIndex - 1 + screens.Count) % screens.Count;
     
-    MoveToScreen(screens[previousIndex]);
-}
+            MoveToScreen(screens[previousIndex]);
+        }
 
-private void MoveToScreen(Forms.Screen screen)
-{
-    // Temporarily change to Normal state to move
-    var previousState = WindowState;
-    WindowState = WindowState.Normal;
+        private void MoveToScreen(Forms.Screen screen)
+        {
+            // Temporarily change to Normal state to move
+            var previousState = WindowState;
+            WindowState = WindowState.Normal;
 
-    // Position window to cover the entire screen
-    Left = screen.Bounds.Left;
-    Top = screen.Bounds.Top;
-    Width = screen.Bounds.Width;
-    Height = screen.Bounds.Height;
+            // Position window to cover the entire screen
+            Left = screen.Bounds.Left;
+            Top = screen.Bounds.Top;
+            Width = screen.Bounds.Width;
+            Height = screen.Bounds.Height;
     
-    // Return to maximized state on the new screen
-    WindowState = WindowState.Maximized;
-}
+            // Return to maximized state on the new screen
+            WindowState = WindowState.Maximized;
+        }
 
-#endregion
+        #endregion
     }
 }
