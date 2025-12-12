@@ -1,4 +1,5 @@
 ﻿using SpotifyAPI.Web;
+using SpottyScreen.Classes;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -6,71 +7,88 @@ using System.Linq;
 using System.Net;
 using System.Text;
 using System.Threading.Tasks;
-using System.Windows;
 
 namespace SpottyScreen.Classes
 {
-    internal class SpotifyManager
+    internal class SpotifyManager : IMusicApiManager
     {
-        private MainWindow mainWindow;
+        private SpotifyClient _spotify;
+        private bool _isPolling;
+        private string _currentTrackId;
 
-        public SpotifyManager(MainWindow mainWindow)
+        private const string ClientId = "41033dc65baf42e287b21398aafb4501";
+        private const string RedirectUri = "http://127.0.0.1:5000/callback";
+
+        public event Action Authenticated;
+        public event Action AuthenticationStarted;
+        public event Action<bool, string> AuthenticationFinished;
+        public event Action<TrackInfo> TrackChanged;
+        public event Action<PlaybackState> PlaybackUpdated;
+        public event Action PlaybackStopped;
+        public event Action<TrackInfo> NextTrackAvailable;
+        public event Action ReauthenticationNeeded;
+        public event Action PollingStopped;
+
+        public void Authenticate()
         {
-            this.mainWindow = mainWindow;
+            _ = AuthenticateAsync();
         }
 
-        public async void Authenticate()
+        public void StartPolling()
         {
-            const string redirectUri = "http://127.0.0.1:5000/callback";
-            const string clientId = "41033dc65baf42e287b21398aafb4501";
+            if (_isPolling) return;
+            _isPolling = true;
+            _ = PollPlaybackAsync();
+        }
 
-            string savedAccessToken = Properties.Settings.Default.SpotifyAccessToken;
-            string savedRefreshToken = Properties.Settings.Default.SpotifyRefreshToken;
+        public void StopPolling()
+        {
+            _isPolling = false;
+        }
 
-            var oauth = new OAuthClient();
+        private async Task AuthenticateAsync()
+        {
+            var savedAccessToken = Properties.Settings.Default.SpotifyAccessToken;
+            var savedRefreshToken = Properties.Settings.Default.SpotifyRefreshToken;
 
-            if (!string.IsNullOrEmpty(savedAccessToken) && !string.IsNullOrEmpty(savedRefreshToken))
+            if (!string.IsNullOrEmpty(savedAccessToken))
             {
-                mainWindow.Spotify = new SpotifyClient(savedAccessToken);
-
+                _spotify = new SpotifyClient(savedAccessToken);
                 try
                 {
-                    await mainWindow.Spotify.Player.GetCurrentPlayback(); // Test if token works
-                    mainWindow.StartPolling();
+                    await _spotify.Player.GetCurrentPlayback(); // Test token
+                    Authenticated?.Invoke();
                     return;
                 }
                 catch (APIUnauthorizedException)
                 {
-                    var success = await RefreshAccessToken(clientId, savedRefreshToken, oauth);
-                    if (success)
+                    var (refreshed, _) = await RefreshAccessTokenAsync(savedRefreshToken);
+                    if (refreshed)
                     {
-                        mainWindow.StartPolling();
+                        Authenticated?.Invoke();
                         return;
                     }
+                    // If refresh fails, ReauthenticationNeeded is fired, so we just exit.
+                    return;
                 }
-                catch (Exception ex) // Catch other potential exceptions during initial check
+                catch (Exception ex)
                 {
                     Console.WriteLine($"Error initializing Spotify client: {ex.Message}");
-                    // Decide how to handle this - maybe attempt full auth flow
+                    // Fall through to full auth flow
                 }
             }
 
-            // If token invalid, expired, or refresh failed, start full auth
-            await StartAuthorizationCodeFlow(clientId, redirectUri, oauth);
+            await StartAuthorizationCodeFlowAsync();
         }
 
-        // Extracted auth flow logic for clarity
-        public async Task StartAuthorizationCodeFlow(string clientId, string redirectUri, OAuthClient oauth)
+        private async Task StartAuthorizationCodeFlowAsync()
         {
             try
             {
+                AuthenticationStarted?.Invoke();
                 var (verifier, challenge) = PKCEUtil.GenerateCodes();
 
-                var loginRequest = new LoginRequest(
-                    new Uri(redirectUri),
-                    clientId,
-                    LoginRequest.ResponseType.Code
-                )
+                var loginRequest = new LoginRequest(new Uri(RedirectUri), ClientId, LoginRequest.ResponseType.Code)
                 {
                     CodeChallengeMethod = "S256",
                     CodeChallenge = challenge,
@@ -79,118 +97,203 @@ namespace SpottyScreen.Classes
 
                 using (var http = new HttpListener())
                 {
-                    http.Prefixes.Add("http://127.0.0.1:5000/callback/"); // Ensure trailing slash
+                    http.Prefixes.Add("http://127.0.0.1:5000/callback/");
                     http.Start();
-                    mainWindow.WindowState = WindowState.Minimized;
 
-                    Process.Start(new ProcessStartInfo
-                    {
-                        FileName = loginRequest.ToUri().ToString(),
-                        UseShellExecute = true
-                    });
+                    Process.Start(new ProcessStartInfo { FileName = loginRequest.ToUri().ToString(), UseShellExecute = true });
 
                     var context = await http.GetContextAsync();
                     var code = context.Request.QueryString["code"];
 
-                    // Send response to browser before proceeding
-                    string responseHtml = "<html><head><style>body { font-family: sans-serif; background-color: #f0f0f0; text-align: center; padding-top: 50px; }</style></head><body><h1>Authentication Successful!</h1><p>You can now close this window and return to SpottyScreen.</p><script>window.close();</script></body></html>";
-                    byte[] buffer = Encoding.UTF8.GetBytes(responseHtml);
+                    const string responseHtml = "<html><head><style>body { font-family: sans-serif; background-color: #f0f0f0; text-align: center; padding-top: 50px; }</style></head><body><h1>Authentication Successful!</h1><p>You can now close this window and return to SpottyScreen.</p><script>window.close();</script></body></html>";
+                    var buffer = Encoding.UTF8.GetBytes(responseHtml);
                     context.Response.ContentType = "text/html";
                     context.Response.ContentLength64 = buffer.Length;
                     await context.Response.OutputStream.WriteAsync(buffer, 0, buffer.Length);
-                    context.Response.Close(); // Close the response stream
-                    http.Stop(); // Stop the listener
-                    mainWindow.WindowState = WindowState.Maximized;
+                    context.Response.Close();
+                    http.Stop();
 
                     if (string.IsNullOrEmpty(code))
                     {
-                        MessageBox.Show("Authentication failed: No code received from Spotify.", "Authentication Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                        // Handle failed auth (e.g., close app, show error message)
+                        AuthenticationFinished?.Invoke(false, "Authentication failed: No code received from Spotify.");
                         return;
                     }
 
-                    var tokenRequest = new PKCETokenRequest(clientId, code, new Uri(redirectUri), verifier);
-                    var tokenResponse = await oauth.RequestToken(tokenRequest);
+                    var tokenRequest = new PKCETokenRequest(ClientId, code, new Uri(RedirectUri), verifier);
+                    var tokenResponse = await new OAuthClient().RequestToken(tokenRequest);
 
                     Properties.Settings.Default.SpotifyAccessToken = tokenResponse.AccessToken;
                     Properties.Settings.Default.SpotifyRefreshToken = tokenResponse.RefreshToken;
                     Properties.Settings.Default.Save();
 
-                    mainWindow.Spotify = new SpotifyClient(tokenResponse.AccessToken);
-                    mainWindow.StartPolling(); // Start polling after successful auth
+                    _spotify = new SpotifyClient(tokenResponse.AccessToken);
+                    AuthenticationFinished?.Invoke(true, null);
+                    Authenticated?.Invoke();
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Authentication flow error: {ex.Message}");
-                MessageBox.Show($"Authentication failed: {ex.Message}", "Authentication Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                // Consider cleaning up tokens if auth fails definitively
                 Properties.Settings.Default.SpotifyAccessToken = null;
                 Properties.Settings.Default.SpotifyRefreshToken = null;
                 Properties.Settings.Default.Save();
+                AuthenticationFinished?.Invoke(false, $"Authentication failed: {ex.Message}");
             }
         }
 
-        public async Task<bool> RefreshAccessToken(string clientId, string refreshToken, OAuthClient oauth)
+        private async Task<(bool, string)> RefreshAccessTokenAsync(string refreshToken)
         {
-            // Prevent null refresh token issue
             if (string.IsNullOrEmpty(refreshToken))
             {
-                Console.WriteLine("Cannot refresh token: Refresh token is missing.");
-                MessageBox.Show("Spotify session expired or invalid. Please log in again.", "Authentication Error", MessageBoxButton.OK, MessageBoxImage.Warning);
-                Properties.Settings.Default.SpotifyAccessToken = null; // Clear invalid tokens
-                Properties.Settings.Default.SpotifyRefreshToken = null;
-                Properties.Settings.Default.Save();
-                // Trigger full re-authentication
-                await StartAuthorizationCodeFlow(clientId, "http://127.0.0.1:5000/callback", oauth);
-                return false; // Indicate refresh wasn't successful (new auth started)
+                const string error = "Cannot refresh token: Refresh token is missing.";
+                Console.WriteLine(error);
+                ClearTokens();
+                ReauthenticationNeeded?.Invoke();
+                return (false, error);
             }
 
             try
             {
-                var refreshRequest = new PKCETokenRefreshRequest(clientId, refreshToken);
-                var tokenResponse = await oauth.RequestToken(refreshRequest);
+                var refreshRequest = new PKCETokenRefreshRequest(ClientId, refreshToken);
+                var tokenResponse = await new OAuthClient().RequestToken(refreshRequest);
 
                 Properties.Settings.Default.SpotifyAccessToken = tokenResponse.AccessToken;
-
-                // Spotify might issue a new refresh token during refresh
                 if (!string.IsNullOrEmpty(tokenResponse.RefreshToken))
                 {
                     Properties.Settings.Default.SpotifyRefreshToken = tokenResponse.RefreshToken;
                 }
-
                 Properties.Settings.Default.Save();
 
-                mainWindow.Spotify = new SpotifyClient(tokenResponse.AccessToken); // Update client with new token
+                _spotify = new SpotifyClient(tokenResponse.AccessToken);
                 Console.WriteLine("Access token refreshed successfully.");
-                return true;
+                return (true, null);
             }
-            catch (APIException apiEx) // Catch specific API errors
+            catch (APIException apiEx)
             {
-                Console.WriteLine($"Token refresh failed: {apiEx.Message}");
-                // Handle specific errors, e.g., invalid_grant often means refresh token is revoked/expired
-                if (apiEx.Response?.StatusCode == System.Net.HttpStatusCode.BadRequest)
+                var error = $"Token refresh failed: {apiEx.Message}";
+                Console.WriteLine(error);
+                if (apiEx.Response?.StatusCode == HttpStatusCode.BadRequest)
                 {
-                    MessageBox.Show("Spotify session expired. Please log in again.", "Authentication Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                    Properties.Settings.Default.SpotifyAccessToken = null; // Clear invalid tokens
-                    Properties.Settings.Default.SpotifyRefreshToken = null;
-                    Properties.Settings.Default.Save();
-                    // Trigger full re-authentication
-                    await StartAuthorizationCodeFlow(clientId, "http://127.0.0.1:5000/callback", oauth);
+                    ClearTokens();
+                    ReauthenticationNeeded?.Invoke();
+                }
+                return (false, error);
+            }
+            catch (Exception ex)
+            {
+                var error = $"Unexpected error during token refresh: {ex.Message}";
+                Console.WriteLine(error);
+                return (false, error);
+            }
+        }
+
+        private async Task PollPlaybackAsync()
+        {
+            Console.WriteLine("Starting playback polling...");
+            while (_isPolling)
+            {
+                if (_spotify == null)
+                {
+                    Console.WriteLine("Spotify client not initialized. Stopping polling.");
+                    StopPolling();
+                    break;
+                }
+
+                try
+                {
+                    var playback = await _spotify.Player.GetCurrentlyPlaying(new PlayerCurrentlyPlayingRequest());
+
+                    if (playback?.Item is FullTrack track && track.Id != _currentTrackId)
+                    {
+                        _currentTrackId = track.Id;
+                        TrackChanged?.Invoke(ToTrackInfo(track));
+                        await FetchNextTrackAsync();
+                    }
+                    else if (playback == null || playback.Item == null)
+                    {
+                        if (_currentTrackId != null)
+                        {
+                            _currentTrackId = null;
+                            PlaybackStopped?.Invoke();
+                        }
+                    }
+
+                    if (playback?.Item is FullTrack currentTrack)
+                    {
+                        var playbackState = new PlaybackState
+                        {
+                            Track = ToTrackInfo(currentTrack),
+                            ProgressMs = playback.ProgressMs,
+                            IsPlaying = playback.IsPlaying
+                        };
+                        PlaybackUpdated?.Invoke(playbackState);
+                    }
+
+                    await Task.Delay(200);
+                }
+                catch (APIUnauthorizedException)
+                {
+                    Console.WriteLine("Access token expired during polling, attempting refresh...");
+                    var (refreshed, _) = await RefreshAccessTokenAsync(Properties.Settings.Default.SpotifyRefreshToken);
+                    if (!refreshed)
+                    {
+                        StopPolling(); // Stop polling if refresh fails
+                    }
+                }
+                catch (APIException apiEx)
+                {
+                    Console.WriteLine($"Spotify API error during polling: {apiEx.Message} (Status: {apiEx.Response?.StatusCode})");
+                    await Task.Delay(apiEx.Response?.StatusCode == (HttpStatusCode)429 ? 5000 : 1000);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Unexpected error during polling: {ex.Message}");
+                    await Task.Delay(2000);
+                }
+            }
+            PollingStopped?.Invoke();
+            Console.WriteLine("Polling stopped.");
+        }
+
+        private async Task FetchNextTrackAsync()
+        {
+            try
+            {
+                var queue = await _spotify.Player.GetQueue();
+                if (queue?.Queue != null && queue.Queue.Any() && queue.Queue.First() is FullTrack track)
+                {
+                    NextTrackAvailable?.Invoke(ToTrackInfo(track));
                 }
                 else
                 {
-                    MessageBox.Show($"Failed to refresh Spotify session: {apiEx.Message}", "Authentication Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    NextTrackAvailable?.Invoke(null);
                 }
-                return false;
             }
-            catch (Exception ex) // Catch other unexpected errors
+            catch (Exception ex)
             {
-                Console.WriteLine($"Unexpected error during token refresh: {ex.Message}");
-                MessageBox.Show($"An unexpected error occurred while refreshing the Spotify session: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                // Potentially clear tokens or attempt re-auth depending on the error
-                return false;
+                Console.WriteLine($"Error fetching next track: {ex.Message}");
+                NextTrackAvailable?.Invoke(null);
             }
+        }
+
+        private void ClearTokens()
+        {
+            Properties.Settings.Default.SpotifyAccessToken = null;
+            Properties.Settings.Default.SpotifyRefreshToken = null;
+            Properties.Settings.Default.Save();
+        }
+
+        private TrackInfo ToTrackInfo(FullTrack track)
+        {
+            return new TrackInfo
+            {
+                Id = track.Id,
+                Name = track.Name,
+                Artists = track.Artists.Select(a => a.Name).ToList(),
+                AlbumName = track.Album.Name,
+                DurationMs = track.DurationMs,
+                ImageUrl = track.Album.Images.FirstOrDefault()?.Url
+            };
         }
     }
 }
