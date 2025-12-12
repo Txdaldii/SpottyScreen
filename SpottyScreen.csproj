@@ -96,6 +96,7 @@
       <SubType>Code</SubType>
     </Compile>
     <Compile Include="Classes\IMusicApiManager.cs" />
+    <Compile Include="Classes\LocalMusicManager.cs" />
     <Compile Include="Classes\SpotifyManager.cs" />
     <Compile Include="MainWindow.xaml.cs">
       <DependentUpon>MainWindow.xaml</DependentUpon>

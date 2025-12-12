@@ -43,7 +43,7 @@ namespace SpottyScreen
         {
             InitializeComponent();
 
-            _musicManager = new SpotifyManager();
+            _musicManager = new LocalMusicManager();
             SubscribeToMusicManagerEvents();
 
             LyricsScrollViewer.Loaded += (s, e) => { /* Can trigger initial UI update if needed */ };
